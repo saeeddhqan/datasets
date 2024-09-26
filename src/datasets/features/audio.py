@@ -2,6 +2,7 @@ import os
 from dataclasses import dataclass, field
 from io import BytesIO
 from typing import TYPE_CHECKING, Any, ClassVar, Dict, Optional, Union
+from subprocess import CalledProcessError, run
 
 import numpy as np
 import pyarrow as pa
@@ -123,6 +124,27 @@ class Audio:
                 f"An audio sample should have one of 'path' or 'bytes' but they are missing or None in {value}."
             )
 
+    def load_audio(self, file: str, sr: int = 16000):
+        cmd = [
+            'ffmpeg',
+            '-nostdin',
+            '-threads', '0',
+            '-i', file,
+            '-f', 's16le',
+            '-ac', '1',
+            '-acodec', 'pcm_s16le',
+            '-ar', str(sr),
+            '-'
+        ]
+
+        try:
+            out = run(cmd, capture_output=True, check=True).stdout
+        except CalledProcessError as e:
+            raise RuntimeError(f"Failed to load audio: {e.stderr.decode()}") from e
+
+        return np.frombuffer(out, np.int16).flatten().astype(np.float32) / 32768.0
+
+
     def decode_example(
         self, value: dict, token_per_repo_id: Optional[Dict[str, Union[str, bool, None]]] = None
     ) -> dict:
@@ -181,10 +203,14 @@ class Audio:
 
             download_config = DownloadConfig(token=token)
             with xopen(path, "rb", download_config=download_config) as f:
-                array, sampling_rate = sf.read(f)
-
+                array, sampling_rate = sf.read(f) # should be changed
         else:
-            array, sampling_rate = sf.read(file)
+            tmp_path = '/tmp/fpx.' + path.split('.')[-1]
+            with open(tmp_path, 'wb') as fp:
+                fp.write(value['bytes'])
+            # array, sampling_rate = sf.read(file)
+            sampling_rate = 16000
+            array = self.load_audio(tmp_path, sampling_rate)
 
         array = array.T
         if self.mono:
@@ -192,7 +218,6 @@ class Audio:
         if self.sampling_rate and self.sampling_rate != sampling_rate:
             array = librosa.resample(array, orig_sr=sampling_rate, target_sr=self.sampling_rate)
             sampling_rate = self.sampling_rate
-
         return {"path": path, "array": array, "sampling_rate": sampling_rate}
 
     def flatten(self) -> Union["FeatureType", Dict[str, "FeatureType"]]:
